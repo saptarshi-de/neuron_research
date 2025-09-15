@@ -1,0 +1,624 @@
+iclamp_refs = []
+for neuron in ei_mono_neurons:
+    stim = h.IClamp(neuron.soma(0.5))
+    stim.delay = 150   
+    stim.dur = 200     
+    stim.amp = -0.2     
+
+    iclamp_refs.append(stim)  
+
+   
+    if not hasattr(neuron, 'iclamp_i'):
+        neuron.iclamp_i = []
+    neuron.iclamp_i.append(h.Vector().record(stim._ref_i))
+####
+
+
+for amp in amps:
+    # Set IClamp amplitude for all EI_MONO neurons
+    for stim in iclamp_refs:
+        stim.amp = amp
+
+    # Run simulation
+    h.finitialize(-65)
+    h.continuerun(700)
+
+    # Store voltages
+    results[amp] = [np.array(neuron.v) for neuron in ei_mono_neurons]
+
+# Now plot comparison
+plt.figure(figsize=(12, 6))
+for i, amp in enumerate(amps):
+    for j, v in enumerate(results[amp][:2]):  # first 2 EI_MONO neurons
+        plt.subplot(2, 1, j+1)
+        plt.plot(t_np, v, label=f"Amp {amp} mA", alpha=0.8)
+        plt.title(f"EI_MONO_{j+1}")
+        plt.ylabel("Vm (mV)")
+        plt.legend()
+plt.xlabel("Time (ms)")
+plt.tight_layout()
+plt.show()
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from neuron import h, gui
+v = h.VecStim()
+
+
+h.load_file("stdrun.hoc")
+
+class HHNeuron:
+    def __init__(self, name, adapt_gmax=0.0005, adapt_tau=100, soma_L=30, soma_diam=30):
+        self.soma = h.Section(name=name)
+        self.soma.L = soma_L
+        self.soma.diam = soma_diam
+        self.soma.Ra = 100
+        self.soma.cm = 1
+        self.soma.insert('hh')
+        for seg in self.soma:
+            seg.hh.gnabar = 0.12
+            seg.hh.gkbar = 0.036
+            seg.hh.gl = 0.0003
+            seg.hh.el = -54.3
+
+        self.adapt = h.Adapt(self.soma(0.5))
+        self.adapt.gmax = adapt_gmax
+        self.adapt.tau = adapt_tau
+
+        self.v = h.Vector().record(self.soma(0.5)._ref_v)
+        self.ina = h.Vector().record(self.soma(0.5)._ref_ina)
+        self.ik = h.Vector().record(self.soma(0.5)._ref_ik)
+        self.iadapt = h.Vector().record(self.adapt._ref_iadapt)
+        self.m = h.Vector().record(self.soma(0.5).hh._ref_m)
+        self.h_gate = h.Vector().record(self.soma(0.5).hh._ref_h)
+        self.n = h.Vector().record(self.soma(0.5).hh._ref_n)
+        self.spikes = h.Vector()
+        self.nc = h.NetCon(self.soma(0.5)._ref_v, None, sec=self.soma)
+        self.nc.threshold = -20
+        self.nc.record(self.spikes)
+        self.nc_adapt = h.NetCon(self.soma(0.5)._ref_v, self.adapt, sec=self.soma)
+        self.nc_adapt.threshold = -20
+        self.nc_adapt.weight[0] = 1
+    
+    def connect_to(self, target_syn, weight=0.1, delay=0.1):
+        nc = h.NetCon(self.soma(0.5)._ref_v, target_syn, sec=self.soma)
+        nc.weight[0] = weight
+        nc.delay = delay
+        nc.threshold = -20
+        return nc
+
+
+class DetonatorInput:
+    def __init__(self, target_sec, tau=1, e=0, start=100, weight=0.1):
+        self.syn = h.ExpSyn(target_sec(0.5))
+        self.syn.e = e
+        self.syn.tau = tau
+
+        self.stim = h.NetStim()
+        self.stim.start = start
+        self.stim.number = 1
+        self.stim.interval = 1
+
+        self.nc = h.NetCon(self.stim, self.syn)
+        self.nc.weight[0] = weight
+        self.isyn = h.Vector().record(self.syn._ref_i)
+
+class RHAGNeuron(HHNeuron):
+    def __init__(self):
+        super().__init__(name='rhag', adapt_gmax=0.0005, adapt_tau=100)
+        self.input = DetonatorInput(self.soma, tau=1, start=100, weight = 0.1)
+        self.isyn = self.input.isyn
+
+class PAX6Neuron(HHNeuron):
+    def __init__(self, idx):
+        super().__init__(name=f'pax6_{idx+1}', adapt_gmax=0.0005, adapt_tau=100)
+        self.syn = h.ExpSyn(self.soma(0.5))
+        self.syn.e = 0
+        self.syn.tau = 1
+        self.isyn = h.Vector().record(self.syn._ref_i)
+
+class NRHAGNeuron(HHNeuron):
+    def __init__(self, idx):
+        super().__init__(name=f'nrhag_{idx+1}', adapt_tau=90)
+        self.input = DetonatorInput(self.soma, tau=1, start=100, weight=0.1)
+        self.isyn = self.input.isyn
+
+class ExcNeuron(HHNeuron):
+    def __init__(self, idx):
+        super().__init__(name=f'exc_{idx+1}')
+        # Optionally: different channel properties for excitatory neurons
+
+class InhNeuron(HHNeuron):
+    def __init__(self, idx):
+        super().__init__(name=f'inh_{idx+1}')
+        # Optionally: different channel properties for inhibitory neurons
+
+
+#NETWORK CONSTRUCTION
+
+num_rhag = 4
+num_pax6 = 8  # Choose >=4 for more realistic overlaps; can be 4 to match your example
+num_nrhag = 23  # or whatever number you want!
+num_ex = 8  # or more; as desired
+num_in = 8
+
+w_mono_inhib = 1.0  # baseline weight for monosynaptic inhibition
+w_disyn_inhib = 3.5 * w_mono_inhib  # 3.5 times stronger for disynaptic inhibition
+
+
+# Create neuron populations
+rhag_cells = [RHAGNeuron() for _ in range(num_rhag)]
+nrhag_cells = [NRHAGNeuron(i) for i in range(num_nrhag)]
+pax6_cells = [PAX6Neuron(idx) for idx in range(num_pax6)]
+exc_neurons = [ExcNeuron(i) for i in range(num_ex)]
+inh_neurons = [InhNeuron(i) for i in range(num_in)]
+# -----------------------------------------------------------
+# Monosynaptic inhibition: NPAX6 → EI_MONO neurons
+# -----------------------------------------------------------
+
+# Parameters
+num_ei_mono = 4          # number of EI target neurons (for monosynaptic input)
+num_npax6 = 4            # number of NPAX6 inhibitory source neurons
+w_mono_inhib = 1.0       # baseline inhibitory weight (disynaptic will be 3.5× stronger)
+
+# Define NPAX6 inhibitory neurons
+npax6_neurons = [InhNeuron(i) for i in range(num_npax6)]
+
+# Define a *separate* EI population for monosynaptic inhibition targets
+ei_mono_neurons = [HHNeuron(name=f'ei_mono_{i+1}') for i in range(num_ei_mono)]
+
+# Give NPAX6 neurons an input (so they spike)
+for neuron in npax6_neurons:
+    neuron.input = DetonatorInput(neuron.soma, tau=1, start=100, weight=0.1)
+    neuron.input.stim.number = 10
+    neuron.input.stim.interval = 30
+
+#for neuron in ei_mono_neurons:
+#    neuron.input = DetonatorInput(neuron.soma, tau=1, start=100, weight=0.1)
+#    neuron.input.stim.number = 10
+#    neuron.input.stim.interval = 30
+
+# Set up monosynaptic inhibitory connections NPAX6 → EI_MONO
+# Inject an IPSP-like current clamp into the first EI_MONO neuron
+iclamp = h.IClamp(ei_mono_neurons[0].soma(0.5))
+iclamp.delay = 100   # ms, start of current injection
+iclamp.dur = 200      # ms, duration of injection
+iclamp.amp = -0.2    # nA, negative for IPSP/hyperpolarization
+
+# Optionally record and plot the current
+ei_mono_neurons[0].iclamp_i = h.Vector().record(iclamp._ref_i)
+
+
+
+rng = np.random.default_rng()
+nearest_pax6 = [rng.choice(num_pax6, size=4, replace=False) for _ in range(num_rhag)]
+nearest_pax6_nrhag = [rng.choice(num_pax6, size=4, replace=False) for _ in range(num_nrhag)]
+# Anatomical connection and transmission unreliability (VecStim relay method)
+
+p_proj = 20 / 43  # connection probability
+p_transmit = 0.91 # per-spike transmission probability
+
+p_proj_nrhag = 5 / 37         # 0.135 connectivity probability
+p_transmit_nrhag = 0.2        # Biologically, rarely transmit spikes
+
+
+nrhag_connections = []
+all_nrhag_relay_netcons = []
+
+connections = []
+all_relay_netcons = []
+
+connections_ei = []  # keep references!
+ei_syns = []
+
+# For each PAX6 neuron, select a random set of excitatory and inhibitory neurons to target
+ei_targets = []
+
+
+# First simulate RHAGs to get their spike times
+h.finitialize(-65)
+h.continuerun(700)
+spikes_rhag = [np.array(list(r.spikes)) for r in rhag_cells]
+
+# Simulate NRHAGs separately to get their spike times
+nrhag_spikes = []
+for n in nrhag_cells:
+    h.finitialize(-65)
+    h.continuerun(700)
+    nrhag_spikes.append(np.array(list(n.spikes)))
+
+
+# Now, for each established connection: relay only 91% of spikes from RHAG to PAX6 using VecStim
+for rhag_idx, rhag in enumerate(rhag_cells):
+    for pax6_idx in nearest_pax6[rhag_idx]:
+        if rng.uniform() < p_proj:
+            # Only use 91% of presynaptic spikes for actual transmission
+            relayed_spikes = [t+1.0 for t in spikes_rhag[rhag_idx] if rng.uniform() < p_transmit]  # 1ms delay
+            if relayed_spikes:
+                relay_vec = h.Vector(relayed_spikes)
+                relay_stim = h.VecStim()
+                relay_stim.play(relay_vec)
+                nc = h.NetCon(relay_stim, pax6_cells[pax6_idx].syn)
+                nc.weight[0] = 0.1
+                all_relay_netcons.append(nc)  # Keep refs alive!
+            connections.append((rhag_idx, pax6_idx, 0.1))
+        else:
+            connections.append((rhag_idx, pax6_idx, 0.0))
+
+# NRHAG -> PAX6 VecStim relay
+for nrhag_idx, nrhag in enumerate(nrhag_cells):
+    for pax6_idx in nearest_pax6_nrhag[nrhag_idx]:
+        if rng.uniform() < p_proj_nrhag:
+            relayed_spikes = [t+1.0 for t in nrhag_spikes[nrhag_idx] if rng.uniform() < p_transmit_nrhag]
+            if relayed_spikes:
+                relay_vec = h.Vector(relayed_spikes)
+                relay_stim = h.VecStim()
+                relay_stim.play(relay_vec)
+                nc = h.NetCon(relay_stim, pax6_cells[pax6_idx].syn)
+                nc.weight[0] = 0.01      # <<--- USE SMALLER VALUE HERE!
+                all_nrhag_relay_netcons.append(nc)
+            nrhag_connections.append((nrhag_idx, pax6_idx, 0.01))
+        else:
+            nrhag_connections.append((nrhag_idx, pax6_idx, 0.0))
+
+# Give PAX6 an earlier start (e.g., 90 ms), make EI input later (e.g., >=110 ms)
+#for neuron in exc_neurons + inh_neurons:
+    #neuron.input = DetonatorInput(neuron.soma, tau=1, start=120, weight=0.1)  # Fires after PAX6
+
+
+# map EI index -> list of inhibitory NetCons it receives
+ei_netcons_by_target = {i: [] for i in range(num_ex + num_in)}
+ei_targets = []
+
+# Inhibition parameters
+
+inh_reversal = -65
+inh_tau1 = 0.5      # keep fast rise
+inh_tau2 = 80.0     # much longer decay -> suppresses across multiple input spikes
+inh_delay  = 0.1    # nearly immediate arrival after PAX6 spike
+
+
+for pax6_idx, pax6 in enumerate(pax6_cells):
+    targets = rng.choice(num_ex + num_in, size=4, replace=False)
+    ei_targets.append(targets)
+    for idx in targets:
+        if idx < num_ex:
+            target = exc_neurons[idx]
+        else:
+            target = inh_neurons[idx - num_ex]
+
+        inh_syn = h.Exp2Syn(target.soma(0.5))
+        inh_syn.e = inh_reversal
+        inh_syn.tau1 = inh_tau1
+        inh_syn.tau2 = inh_tau2
+
+        netcon = h.NetCon(pax6.soma(0.5)._ref_v, inh_syn, sec=pax6.soma)
+        netcon.threshold = -20
+        netcon.delay = inh_delay
+        netcon.weight[0] = w_disyn_inhib
+
+        ei_netcons_by_target[idx].append(netcon)
+        ei_syns.append(inh_syn)
+
+        # --- FIX: record from all targets ---
+        if not hasattr(target, 'isyn_inh'):
+            target.isyn_inh = []
+        target.isyn_inh.append(h.Vector().record(inh_syn._ref_i))
+
+
+
+
+# Collect indices of all EI neurons targeted for silencing by any PAX6
+silenced_indices = set()
+for targets in ei_targets:
+    silenced_indices.update(targets)
+
+for neuron in exc_neurons + inh_neurons:
+    # 10 spikes at intervals of 30 ms starting at 100 ms
+    neuron.input = DetonatorInput(neuron.soma, tau=1, start=100, weight=0.1)
+    neuron.input.stim.number = 10
+    neuron.input.stim.interval = 30
+
+
+# Assign DetonatorInput ONLY to EI neurons NOT in silenced_indices
+#for i, neuron in enumerate(exc_neurons + inh_neurons):
+#    if i not in silenced_indices:
+#        neuron.input = DetonatorInput(neuron.soma, tau=1, start=120, weight=0.1)
+    # No input for silenced neurons means they remain silent (flat)
+
+
+
+# Initialize t vector just once
+t = h.Vector().record(h._ref_t)
+
+
+#SIMULATION
+
+# Assign DetonatorInput for multiple spikes ONLY to non-silenced EI neurons
+# First, determine the indices to silence by running a quick simulation
+
+# Assign input to all by default
+for neuron in exc_neurons + inh_neurons:
+    neuron.input = DetonatorInput(neuron.soma, tau=1, start=100, weight=0.1)
+    neuron.input.stim.number = 10
+    neuron.input.stim.interval = 30
+
+
+
+# SIMULATE
+h.finitialize(-65)
+h.continuerun(700)
+
+# Find triggered PAX6 (those that spike)
+def vnp(v): return np.array(list(v))
+def arrlst(lst): return [np.array(list(x)) for x in lst]
+spikes_pax6_np = arrlst([p.spikes for p in pax6_cells])
+triggered_pax6_indices = [idx for idx, s in enumerate(spikes_pax6_np) if len(s) > 0]
+silenced_indices = set()
+for idx in triggered_pax6_indices:
+    silenced_indices.update(ei_targets[idx])
+
+w_silence = 50.0  # Or tune as needed
+for ei_idx, netcons in ei_netcons_by_target.items():
+    for nc in netcons:
+        if ei_idx in silenced_indices:
+            nc.weight[0] = w_silence   # strengthen inhibition when PAX6 spikes
+        else:
+            nc.weight[0] = w_disyn_inhib
+
+
+# Assign input ONLY to non-silenced indices (overwrite previous input for silenced ones)
+#for i, neuron in enumerate(exc_neurons + inh_neurons):
+#    if i in silenced_indices:
+#        neuron.input.stim.number = 0  # disables all presynaptic spikes for the NetStim
+#    else:
+#        neuron.input = DetonatorInput(neuron.soma, tau=1, start=100, weight=0.1)
+#        neuron.input.stim.number = 10
+#        neuron.input.stim.interval = 30
+
+# SIMULATE again for final output!
+h.finitialize(-65)
+h.continuerun(700)
+
+plt.figure(figsize=(8,4))
+plt.plot(t_np, vnp(ei_mono_neurons[0].v), label='EI_MONO_1 Vm')
+plt.plot(t_np, np.array(ei_mono_neurons[0].iclamp_i), '--', label='IClamp Current (nA)')
+plt.xlabel('Time (ms)')
+plt.ylabel('Membrane Potential (mV) / Current (nA)')
+plt.title('Direct IPSP in EI_MONO Neuron')
+plt.legend()
+plt.show()
+
+#DATA EXTRACTION
+
+# Convert t only once
+t_np = np.array(list(t))
+
+v_rhag = [vnp(r.v) for r in rhag_cells]
+ina_rhag = [vnp(r.ina) for r in rhag_cells]
+ik_rhag = [vnp(r.ik) for r in rhag_cells]
+iadapt_rhag = [vnp(r.iadapt) for r in rhag_cells]
+isyn_rhag = [vnp(r.isyn) for r in rhag_cells]
+spikes_rhag = [vnp(r.spikes) for r in rhag_cells]
+
+v_pax6 = [vnp(p.v) for p in pax6_cells]
+
+isyn_pax6_np = arrlst([p.isyn for p in pax6_cells])
+iadapt_pax6_np = arrlst([p.iadapt for p in pax6_cells])
+# Data extraction for NRHAG
+v_nrhag = [vnp(n.v) for n in nrhag_cells]
+ina_nrhag = [vnp(n.ina) for n in nrhag_cells]
+ik_nrhag = [vnp(n.ik) for n in nrhag_cells]
+iadapt_nrhag = [vnp(n.iadapt) for n in nrhag_cells]
+spikes_nrhag = [vnp(n.spikes) for n in nrhag_cells]
+
+
+
+#PLOTTING
+
+plt.figure(figsize=(12, 2 * num_rhag))
+for i, v in enumerate(v_rhag):
+    plt.subplot(num_rhag, 1, i + 1)
+    plt.plot(t_np, v, label=f'RHAG_{i+1}', color='k')
+    plt.ylabel('V_m (mV)')
+    plt.title(f'Membrane Potential: RHAG_{i+1}')
+    plt.xlim(0, 300)
+    plt.legend()
+plt.xlabel('Time (ms)')
+plt.tight_layout()
+plt.show()
+
+# Plot NRHAG membrane potentials
+plt.figure(figsize=(12, 2 * num_nrhag))
+for i, v in enumerate(v_nrhag):
+    plt.subplot(num_nrhag, 1, i + 1)
+    plt.plot(t_np, v, label=f'NRHAG_{i+1}', color='b')
+    plt.ylabel('V_m (mV)')
+    plt.title(f'Membrane Potential: NRHAG_{i+1}')
+    plt.xlim(0, 300)
+    plt.legend()
+plt.xlabel('Time (ms)')
+plt.tight_layout()
+plt.show()
+
+
+plt.figure(figsize=(12, 2 * num_pax6))
+for i, v in enumerate(v_pax6):
+    plt.subplot(num_pax6, 1, i + 1)
+    plt.plot(t_np, v, label=f'PAX6_{i+1}', color=['r','g','b','m','c','y','k','orange'][i % 8])
+    plt.ylabel('V_m (mV)')
+    plt.title(f'Membrane Potential: PAX6_{i+1}')
+    plt.xlim(0, 300)
+    plt.legend()
+plt.xlabel('Time (ms)')
+plt.tight_layout()
+plt.show()
+
+
+# Synaptic currents for each PAX6 neuron
+plt.figure(figsize=(12, 2 * num_pax6))
+import itertools
+colors = itertools.cycle(['r', 'g', 'b', 'm', 'c', 'y', 'k', 'orange'])
+for idx, isyn in enumerate(isyn_pax6_np):
+    plt.subplot(num_pax6, 1, idx + 1)
+    plt.plot(t_np, isyn, color=next(colors), label=f'PAX6_{idx + 1} syn current')
+    plt.ylabel('I_syn (nA)')
+    plt.legend()
+    plt.title(f'Synaptic Current into PAX6_{idx + 1}')
+plt.xlabel('Time (ms)')
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12, 2 * (num_rhag + num_pax6)))
+for i, ia in enumerate(iadapt_rhag):
+    plt.subplot(num_rhag + num_pax6, 1, i + 1)
+    plt.plot(t_np, ia, label=f'RHAG_{i+1} Adapt', color='k')
+    plt.ylabel('I_adapt')
+    plt.title(f'Adaptation Current: RHAG_{i+1}')
+    plt.xlim(0, 300)
+    plt.legend()
+for idx, ia in enumerate(iadapt_pax6_np):
+    plt.subplot(num_rhag + num_pax6, 1, num_rhag + idx + 1)
+    plt.plot(t_np, ia, label=f'PAX6_{idx+1} Adapt', color=['r','g','b','m','c','y','k','orange'][idx % 8])
+    plt.ylabel('I_adapt')
+    plt.title(f'Adaptation Current: PAX6_{idx+1}')
+    plt.xlim(0, 300)
+    plt.legend()
+plt.xlabel('Time (ms)')
+plt.tight_layout()
+plt.show()
+
+
+print(f"RHAG spikes: {len(spikes_rhag)} at times {spikes_rhag}")
+print(f"NRHAG spikes: {len(spikes_nrhag)} at times {spikes_nrhag}")
+
+for idx, s in enumerate(spikes_pax6_np):
+    print(f"PAX6_{idx+1} spikes: {len(s)} at times {s}")
+
+for rhag_idx in range(num_rhag):
+    partners = [pax6_idx for (r_idx, pax6_idx, w) in connections if r_idx == rhag_idx and w > 0.0]
+    print(f"RHAG_{rhag_idx+1} projects to PAX6 neurons: {partners}")
+for pax6_idx in range(num_pax6):
+    sources = [r_idx+1 for (r_idx, p_idx, w) in connections if p_idx==pax6_idx and w > 0.0]
+    print(f"PAX6_{pax6_idx+1} receives from RHAGs: {sources}")
+
+for nrhag_idx in range(num_nrhag):
+    partners = [pax6_idx for (n_idx, pax6_idx, w) in nrhag_connections if n_idx == nrhag_idx and w > 0.0]
+    print(f"NRHAG_{nrhag_idx+1} projects to PAX6 neurons: {partners}")
+
+for pax6_idx in range(num_pax6):
+    sources = [n_idx+1 for (n_idx, p_idx, w) in nrhag_connections if p_idx==pax6_idx and w > 0.0]
+    print(f"PAX6_{pax6_idx+1} receives from NRHAGs: {sources}")
+
+for idx, targets in enumerate(ei_targets):
+    ei_labels = []
+    for t in targets:
+        if t < num_ex:
+            ei_labels.append(f'E{t+1}')
+        else:
+            ei_labels.append(f'I{t+1-num_ex}')
+    print(f'PAX6_{idx+1} targets: {ei_labels}')
+
+# Excitatory neurons
+plt.figure(figsize=(12, 2*num_ex))
+for i, neuron in enumerate(exc_neurons):
+    plt.subplot(num_ex, 1, i+1)
+    plt.plot(t_np, vnp(neuron.v), color='tab:blue', label=f'Exc_{i+1}')
+    plt.title(f"EXC_{i+1}")
+    plt.legend()
+plt.tight_layout()
+plt.show()
+
+# Inhibitory neurons
+plt.figure(figsize=(12, 2*num_in))
+for i, neuron in enumerate(inh_neurons):
+    plt.subplot(num_in, 1, i+1)
+    plt.plot(t_np, vnp(neuron.v), color='tab:red', label=f'Inh_{i+1}')
+    plt.title(f"INH_{i+1}")
+    plt.legend()
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12, 2 * num_ei_mono))
+for i, neuron in enumerate(ei_mono_neurons):
+    plt.subplot(num_ei_mono, 1, i+1)
+    plt.plot(t_np, vnp(neuron.v), color='tab:purple', label=f'EI_MONO_{i+1}')
+    plt.title(f'EI_MONO_{i+1}')
+    plt.legend()
+plt.tight_layout()
+plt.show()
+
+for idx, n in enumerate(npax6_neurons):
+    print(f"NPAX6_{idx+1} spikes: {len(list(n.spikes))} times {list(n.spikes)}")
+
+#Mono vs Di synaptic inhibition
+print("Disyn isyn_inh entries:", [len(vec) for vec in getattr(exc_neurons[0], 'isyn_inh', [])])
+print("Mono isyn_inh entries:", [len(vec) for vec in getattr(ei_mono_neurons[0], 'isyn_inh', [])])
+print("EI_MONO_1 inhibitory vectors:", [len(vec) for vec in ei_mono_neurons[0].isyn_inh])
+print("t_np length:", len(t_np))
+
+for i, n in enumerate(ei_mono_neurons):
+    for j, vec in enumerate(n.isyn_inh):
+        vec_np = vec.as_numpy()
+        print(f"EI_MONO_{i+1} inh vec {j} length: {len(vec_np)}, sum: {np.sum(vec_np)}")
+
+isyn_disyn = np.sum(
+    [vec.as_numpy() for n in exc_neurons+inh_neurons if hasattr(n, 'isyn_inh') for vec in n.isyn_inh],
+    axis=0
+)
+isyn_mono_list = []
+for n in ei_mono_neurons:
+    if hasattr(n, 'isyn_inh'):
+        for vec in n.isyn_inh:
+            vec_np = vec.as_numpy()
+            if len(vec_np) == len(t_np):
+                isyn_mono_list.append(vec_np)
+            elif len(vec_np) == 0:
+                isyn_mono_list.append(np.zeros(len(t_np)))  # pad empty vectors
+            else:
+                # If vector is shorter, pad to match t_np
+                padded = np.zeros(len(t_np))
+                padded[:len(vec_np)] = vec_np
+                isyn_mono_list.append(padded)
+
+isyn_mono = np.sum(isyn_mono_list, axis=0)
+
+
+minlen = min(len(t_np), len(isyn_disyn), len(isyn_mono))
+plt.figure(figsize=(10, 4))
+plt.plot(t_np[:minlen], isyn_disyn[:minlen], label="Disynaptic (PAX6→EI)", color='orangered')
+plt.plot(t_np[:minlen], isyn_mono[:minlen],  label="Monosynaptic (NPAX6→EI)", color='royalblue')
+plt.title("Total Inhibitory Synaptic Current")
+plt.xlabel("Time (ms)")
+plt.ylabel("Total Inhibitory Current (nA)")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+
+plt.figure(figsize=(12, 4))
+all_spikes = spikes_rhag + spikes_pax6_np
+lineoffsets = list(range(num_rhag, 0, -1)) + list(range(-1, -num_pax6-1, -1))
+plt.eventplot(all_spikes, lineoffsets=lineoffsets, colors=['k']*num_rhag + ['r','g','b','m','c','y','k','orange'][:num_pax6])
+plt.yticks(
+    list(range(num_rhag, 0, -1)) + list(range(-1, -num_pax6-1, -1)),
+    [f'RHAG_{i+1}' for i in range(num_rhag)] + [f'PAX6_{i+1}' for i in range(num_pax6)]
+)
+plt.xlim(0, 300)
+plt.xlabel('Time (ms)')
+plt.title('Spike Raster')
+plt.tight_layout()
+plt.show()
+
+conn_matrix = np.zeros((num_rhag, num_pax6))
+for r, p, w in connections:
+    if w > 0: conn_matrix[r, p] = 1
+plt.imshow(conn_matrix, aspect='auto', cmap='Greys')
+plt.xlabel('PAX6 Index')
+plt.ylabel('RHAG Index')
+plt.title('RHAG-to-PAX6 Connectivity Matrix')
+plt.colorbar(label="Connected (1) / Not (0)")
+plt.show()

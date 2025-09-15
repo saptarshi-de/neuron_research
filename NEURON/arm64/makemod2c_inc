@@ -1,0 +1,32 @@
+./adapt.c: ../adapt.mod
+	@printf " -> $(C_GREEN)NMODL$(C_RESET) $<\\n"
+	(cd "..";  MODLUNIT=$(NRNUNITS) $(NOCMODL) "adapt.mod" -o "/Users/pradipkumarde/Desktop/Research/SURF/Neurons/NEURON/arm64")
+
+./adapt.o: ./adapt.c
+	@printf " -> $(C_GREEN)Compiling$(C_RESET) $<\\n"
+	$(COMPILE) -I".." $(INCLUDES) -fPIC -c $< -o $@
+
+./cal.c: ../cal.mod
+	@printf " -> $(C_GREEN)NMODL$(C_RESET) $<\\n"
+	(cd "..";  MODLUNIT=$(NRNUNITS) $(NOCMODL) "cal.mod" -o "/Users/pradipkumarde/Desktop/Research/SURF/Neurons/NEURON/arm64")
+
+./cal.o: ./cal.c
+	@printf " -> $(C_GREEN)Compiling$(C_RESET) $<\\n"
+	$(COMPILE) -I".." $(INCLUDES) -fPIC -c $< -o $@
+
+./KCa.c: ../KCa.mod
+	@printf " -> $(C_GREEN)NMODL$(C_RESET) $<\\n"
+	(cd "..";  MODLUNIT=$(NRNUNITS) $(NOCMODL) "KCa.mod" -o "/Users/pradipkumarde/Desktop/Research/SURF/Neurons/NEURON/arm64")
+
+./KCa.o: ./KCa.c
+	@printf " -> $(C_GREEN)Compiling$(C_RESET) $<\\n"
+	$(COMPILE) -I".." $(INCLUDES) -fPIC -c $< -o $@
+
+./VecStim.c: ../VecStim.mod
+	@printf " -> $(C_GREEN)NMODL$(C_RESET) $<\\n"
+	(cd "..";  MODLUNIT=$(NRNUNITS) $(NOCMODL) "VecStim.mod" -o "/Users/pradipkumarde/Desktop/Research/SURF/Neurons/NEURON/arm64")
+
+./VecStim.o: ./VecStim.c
+	@printf " -> $(C_GREEN)Compiling$(C_RESET) $<\\n"
+	$(COMPILE) -I".." $(INCLUDES) -fPIC -c $< -o $@
+
